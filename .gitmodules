@@ -1,0 +1,6 @@
+[submodule "duckdb"]
+	path = duckdb
+	url = git@github.com:duckdb/duckdb.git
+[submodule "perfcxx"]
+	path = perfcxx
+	url = git@github.com:awitten1/perfcxx.git
