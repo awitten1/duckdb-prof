@@ -1,0 +1,10 @@
+
+If:
+  PathMatch: duckdb/.*
+CompileFlags:
+  CompilationDatabase: duckdb/build/clangd
+---
+If:
+  PathMatch: .*
+CompileFlags:
+  CompilationDatabase: build
