@@ -2,6 +2,7 @@
 
 #include "duckdb/main/connection.hpp"
 #include "perfcxx/perf-lib.hpp"
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -63,119 +64,73 @@ void run_queries(duckdb::Connection& conn, std::string query) {
     waitpid(pid, &loc, 0);
 }
 
+inline void serialize() {
+    asm volatile("xor %%eax, %%eax \n cpuid " ::: "%eax","%ebx","%ecx","%edx");
+}
+
+void sum_numbers() {
+    std::vector<uint64_t> numbers(1000000000);
+
+    std::transform(numbers.begin(), numbers.end(), numbers.begin(), [](int) {
+        return rand() % 1000000;
+    });
+    PerfEventGroup events(PERF_COUNT_HW_CPU_CYCLES, PERF_TYPE_HARDWARE, "cycles");
+    events.AddEvent(PERF_COUNT_HW_INSTRUCTIONS, PERF_TYPE_HARDWARE, "ins");
+
+    uint64_t res = 0;
+
+    events.Enable();
+    serialize();
+    for (int i = 0; i < numbers.size(); ++i) {
+        res += numbers[i];
+    }
+    serialize();
+    events.Disable();
+
+    auto n = events.ReadEvents();
+
+    std::cout << "res = " << res << std::endl;
+    std::cout << "cycles = " << *n["cycles"] << ", " << "ins = "
+        << *n["ins"] << ", IPC = " << (double)*n["ins"]/ *n["cycles"] << ", ms = " << *n["wall_clock_ms"] << std::endl;
+
+}
+
+void ddb_sum(duckdb::Connection& conn) {
+    auto res = conn.Query("ATTACH ':memory:' as mem; use mem; ");
+    if (res->HasError()) {
+        throw std::runtime_error{"blah"};
+    }
+    conn.Query("create table x as select (random()*1000000)::ubigint a from range(1000000000);");
+
+
+    PerfEventGroup events(PERF_COUNT_HW_CPU_CYCLES, PERF_TYPE_HARDWARE, "cycles");
+    events.AddEvent(PERF_COUNT_HW_INSTRUCTIONS, PERF_TYPE_HARDWARE, "ins");
+
+    events.Enable();
+    serialize();
+    res = conn.Query("select sum(a) from x;");
+    serialize();
+    events.Disable();
+
+    auto n = events.ReadEvents();
+
+    auto p = res->Fetch()->GetValue(0, 0);
+
+    std::cout << "res = " << p << std::endl;
+    std::cout << "cycles = " << *n["cycles"] << ", " << "ins = "
+        << *n["ins"] << ", IPC = " << (double)*n["ins"]/ *n["cycles"] << ", ms = " << *n["wall_clock_ms"] << std::endl;
+
+
+    serialize();
+}
+
 int main() {
     duckdb::DuckDB db;
     duckdb::Connection conn(db);
-    run_tpch(conn);
 
-    std::vector<std::string> queries = {
-R"(
-SELECT
-    nation,
-    o_year,
-    sum(amount) AS sum_profit
-FROM (
-    SELECT
-        n_name AS nation,
-        extract(year FROM o_orderdate) AS o_year,
-        l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity AS amount
-    FROM
-        part,
-        supplier,
-        lineitem,
-        partsupp,
-        orders,
-        nation
-    WHERE
-        s_suppkey = l_suppkey
-        AND ps_suppkey = l_suppkey
-        AND ps_partkey = l_partkey
-        AND p_partkey = l_partkey
-        AND o_orderkey = l_orderkey
-        AND s_nationkey = n_nationkey
-        AND p_name LIKE '%green%') AS profit
-GROUP BY
-    nation,
-    o_year
-ORDER BY
-    nation,
-    o_year DESC;
+    sum_numbers();
 
-    )"
-    };
+    ddb_sum(conn);
 
-    auto& events = GetGlobalPerfEventGroup();
-    events.AddEvent(PERF_COUNT_HW_INSTRUCTIONS, PERF_TYPE_HARDWARE, "ins");
-    events.AddEvent(PERF_COUNT_HW_CPU_CYCLES, PERF_TYPE_HARDWARE, "cycles");
-    // events.AddEvent(PERF_COUNT_HW_CACHE_L1D |
-    //         (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-    //         (PERF_COUNT_HW_CACHE_RESULT_MISS << 16), PERF_TYPE_HW_CACHE, "l1d_cache_misses");
-
-    // events.AddEvent(PERF_COUNT_HW_CACHE_L1D |
-    //         (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-    //         (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16), PERF_TYPE_HW_CACHE, "l1d_cache_accesses");
-
-    events.AddEvent(PERF_COUNT_HW_CACHE_L1I |
-            (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-            (PERF_COUNT_HW_CACHE_RESULT_MISS << 16), PERF_TYPE_HW_CACHE, "l1i_cache_misses");
-
-    events.AddEvent(PERF_COUNT_HW_CACHE_L1I |
-            (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-            (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16), PERF_TYPE_HW_CACHE, "l1i_cache_accesses");
-
-    events.AddEvent(PERF_COUNT_HW_CACHE_MISSES, PERF_TYPE_HARDWARE, "llc_cache_misses");
-    events.AddEvent(PERF_COUNT_HW_CACHE_REFERENCES, PERF_TYPE_HARDWARE, "llc_cache_accesses");
-    run_queries(conn, queries[0]);
-    auto counters = events.ReadEvents();
-    for (const auto [k,v] : counters) {
-        std::cout << k << ", " << *v << std::endl;
-    }
-    //std::cout << "l1d cache miss rate = " << static_cast<double>(*counters["l1d_cache_misses"]) / (*counters["l1d_cache_accesses"]) << std::endl;
-    std::cout << "l1i cache miss rate = " << static_cast<double>(*counters["l1i_cache_misses"]) / (*counters["l1i_cache_accesses"]) << std::endl;
-    //std::cout << "llc cache miss rate = " << static_cast<double>(*counters["llc_cache_misses"]) / (*counters["llc_cache_accesses"]) << std::endl;
-
-    std::cout << "IPC = " << static_cast<double>(*counters["ins"])/(*counters["cycles"]) << std::endl;
-    //int num_tpch_queries = 22;
-    //for (int i = 1; i <= num_tpch_queries + queries.size(); ++i) {
-        //std::cout << "\n\n" << "query " << i << std::endl;
-        // PerfEventGroup events(PERF_COUNT_HW_CPU_CYCLES, PERF_TYPE_HARDWARE, "cycles");
-        // events.AddEvent(PERF_COUNT_HW_INSTRUCTIONS, PERF_TYPE_HARDWARE, "ins");
-        // // events.AddEvent(PERF_COUNT_HW_CACHE_L1D |
-        // //         (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-        // //         (PERF_COUNT_HW_CACHE_RESULT_MISS << 16), PERF_TYPE_HW_CACHE, "l1d_cache_misses");
-
-        // // events.AddEvent(PERF_COUNT_HW_CACHE_L1D |
-        // //         (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-        // //         (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16), PERF_TYPE_HW_CACHE, "l1d_cache_accesses");
-
-        // events.AddEvent(PERF_COUNT_HW_CACHE_L1I |
-        //         (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-        //         (PERF_COUNT_HW_CACHE_RESULT_MISS << 16), PERF_TYPE_HW_CACHE, "l1i_cache_misses");
-
-        // events.AddEvent(PERF_COUNT_HW_CACHE_L1I |
-        //         (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-        //         (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16), PERF_TYPE_HW_CACHE, "l1i_cache_accesses");
-
-        // events.AddEvent(PERF_COUNT_HW_CACHE_MISSES, PERF_TYPE_HARDWARE, "llc_cache_misses");
-        // events.AddEvent(PERF_COUNT_HW_CACHE_REFERENCES, PERF_TYPE_HARDWARE, "llc_cache_accesses");
-
-        //events.Enable();
-        //if (i <= num_tpch_queries) {
-            //run_queries(conn, i);
-        //} else {
-            //run_queries(conn, queries[i - num_tpch_queries - 1]);
-        //}
-        //events.Disable();
-
-        // auto counters = events.ReadEvents();
-        // for (const auto [k,v] : counters) {
-        //     std::cout << k << ", " << *v << std::endl;
-        // }
-        // //std::cout << "l1d cache miss rate = " << static_cast<double>(*counters["l1d_cache_misses"]) / (*counters["l1d_cache_accesses"]) << std::endl;
-        // std::cout << "l1i cache miss rate = " << static_cast<double>(*counters["l1i_cache_misses"]) / (*counters["l1i_cache_accesses"]) << std::endl;
-        // //std::cout << "llc cache miss rate = " << static_cast<double>(*counters["llc_cache_misses"]) / (*counters["llc_cache_accesses"]) << std::endl;
-
-        // std::cout << "IPC = " << static_cast<double>(*counters["ins"])/(*counters["cycles"]) << std::endl;
-    //}
     return 0;
 }
