@@ -1,5 +1,8 @@
 
 
+#include "duckdb/common/allocator.hpp"
+#include "duckdb/common/typedefs.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "perfcxx/perf-lib.hpp"
 #include <algorithm>
@@ -39,34 +42,65 @@ void run_tpch(duckdb::Connection& conn) {
     }
 }
 
-void run_queries(duckdb::Connection& conn, int query) {
+void run_tpch_query(duckdb::Connection& conn, int query) {
     auto res = conn.Query(fmt::format("pragma tpch({})", query));
     if (res->HasError()) {
-        throw std::runtime_error{fmt::format("got error running tpch 18. reason: {}", res->GetError())};
+        throw std::runtime_error{fmt::format("got error running tpch {}. reason: {}", query, res->GetError())};
+    }
+}
+
+void run_all_tpch_queries(duckdb::Connection& conn) {
+    PerfEventGroup events(PERF_COUNT_HW_CPU_CYCLES, PERF_TYPE_HARDWARE, "cycles");
+    events.AddEvent(PERF_COUNT_HW_INSTRUCTIONS, PERF_TYPE_HARDWARE, "ins");
+    events.AddEvent(0xff45, PERF_TYPE_RAW, "dTLB_misses");
+
+    for (int i = 1; i <= 22; i++) {
+        asm volatile("xor %%eax, %%eax; cpuid;" ::: "eax","ebx","ecx","edx");
+        events.Enable(true);
+        auto t1 = std::chrono::steady_clock::now();
+        run_tpch_query(conn, i);
+        auto t2 = std::chrono::steady_clock::now();
+        std::cout << "query " << i << " took " <<
+            std::chrono::duration<double, std::ratio<1, 1>>(t2 - t1).count()
+            << " seconds " << std::endl;
+        asm volatile("xor %%eax, %%eax; cpuid;" ::: "eax","ebx","ecx","edx");
+        events.Disable();
+        auto revents = events.ReadEvents();
+        for (auto &key : revents) {
+            std::cout << key.first << ", " << *key.second << std::endl;
+        }
     }
 }
 
 void run_queries(duckdb::Connection& conn, std::string query) {
-    pid_t pid = fork();
-
-    if (pid == 0) {
-        pid_t parent_pid = getppid();
-        std::string cmd = fmt::format("perf record -F 99 -p {} -g", parent_pid);
-        //system(cmd.c_str());
-        exit(EXIT_SUCCESS);
-    }
     auto res = conn.Query(query);
     if (res->HasError()) {
         throw std::runtime_error{fmt::format("got error: message = {}", res->GetError())};
     }
-    ::kill(pid, SIGTERM);
-    int loc;
-    waitpid(pid, &loc, 0);
 }
 
 inline void serialize() {
     asm volatile("xor %%eax, %%eax \n cpuid " ::: "%eax","%ebx","%ecx","%edx");
 }
+
+
+template<typename Callable>
+void profile_code(const Callable& c) {
+    pid_t pid = fork();
+    if (pid > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        c();
+        kill(pid, SIGTERM);
+        int loc;
+        waitpid(pid, &loc, 0);
+    } else if (pid == 0) {
+        pid_t parent_pid = getppid();
+        std::string cmd = fmt::format("perf record -F 99 -p {} --call-graph dwarf", parent_pid);
+        system(cmd.c_str());
+        exit(EXIT_SUCCESS);
+    }
+}
+
 
 void sum_numbers() {
     std::vector<uint64_t> numbers(1000000000);
@@ -101,14 +135,14 @@ void ddb_sum(duckdb::Connection& conn) {
         throw std::runtime_error{"blah"};
     }
     conn.Query("create table x as select (random()*1000000)::ubigint a from range(1000000000);");
-
-
+    serialize();
+    conn.Query("select sum(a) from x;");
     PerfEventGroup events(PERF_COUNT_HW_CPU_CYCLES, PERF_TYPE_HARDWARE, "cycles");
     events.AddEvent(PERF_COUNT_HW_INSTRUCTIONS, PERF_TYPE_HARDWARE, "ins");
 
     events.Enable();
     serialize();
-    res = conn.Query("select sum(a) from x;");
+    res = conn.Query("set threads = 1; select sum(a) from x;");
     serialize();
     events.Disable();
 
@@ -124,13 +158,42 @@ void ddb_sum(duckdb::Connection& conn) {
     serialize();
 }
 
+// typedef data_ptr_t (*allocate_function_ptr_t)(PrivateAllocatorData *private_data, idx_t size);
+// typedef void (*free_function_ptr_t)(PrivateAllocatorData *private_data, data_ptr_t pointer, idx_t size);
+// typedef data_ptr_t (*reallocate_function_ptr_t)(PrivateAllocatorData *private_data, data_ptr_t pointer, idx_t old_size,
+//                                                 idx_t size);
+
+
+// static char* mem;
+// static std::vector<int> free_blocks;
+
+// static void init_mem() {
+
+// }
+
+
+static duckdb::data_ptr_t allocate_fun(duckdb::PrivateAllocatorData *private_data, duckdb::idx_t size) {
+
+}
+
+static void free_fun(duckdb::PrivateAllocatorData* private_data, duckdb::data_ptr_t pointer, duckdb::idx_t size) {
+
+}
+
+static duckdb::data_ptr_t realloc_fun(duckdb::PrivateAllocatorData* private_data, duckdb::data_ptr_t pointer, duckdb::idx_t old_size) {
+
+}
+
+
 int main() {
     duckdb::DuckDB db;
     duckdb::Connection conn(db);
 
-    sum_numbers();
+    //sum_numbers();
 
-    ddb_sum(conn);
+    //profile_code([&conn]() { ddb_sum(conn); });
+    run_tpch(conn);
+    run_all_tpch_queries(conn);
 
     return 0;
 }
