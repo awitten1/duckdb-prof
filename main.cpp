@@ -55,16 +55,14 @@ void run_all_tpch_queries(duckdb::Connection& conn) {
     events.AddEvent(0xff45, PERF_TYPE_RAW, "dTLB_misses");
 
     for (int i = 1; i <= 22; i++) {
-        asm volatile("xor %%eax, %%eax; cpuid;" ::: "eax","ebx","ecx","edx");
         events.Enable(true);
         auto t1 = std::chrono::steady_clock::now();
         run_tpch_query(conn, i);
         auto t2 = std::chrono::steady_clock::now();
+        events.Disable();
         std::cout << "query " << i << " took " <<
             std::chrono::duration<double, std::ratio<1, 1>>(t2 - t1).count()
             << " seconds " << std::endl;
-        asm volatile("xor %%eax, %%eax; cpuid;" ::: "eax","ebx","ecx","edx");
-        events.Disable();
         auto revents = events.ReadEvents();
         for (auto &key : revents) {
             std::cout << key.first << ", " << *key.second << std::endl;
